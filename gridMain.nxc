@@ -1,0 +1,802 @@
+/*
+Attempt to create map of environment using Occupancy Grid for LegoNXT 2.0
+Firmware on brick is Extended NXC: lms_arm_nbcnxc_132.rfw
+Each grid sq 13.5 x 13.5 cm - total area 270 x 270 cm
+Samantha Ahern - DeMontfort University, Leicester, UK
+Copyright 2015 - De Montfort University.
+This program is distributed under the terms of the GNU General Public License (or the Lesser GPL).
+*/
+
+*/
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+
+#include "NXCDefs.h"
+
+mutex moveMutex;
+
+//global variables for sensor data
+float sonarRight = 0;
+float sonarLeft = 0;
+float sonarCentre = 0;
+int compassRead = 0;
+const int minSonar = 2.5;   // distance: sonar to near edge of adj grid sq
+const int maxSonar = 16; // distance: sonar to far edge of adj grid sq
+
+const int runTime = 150000;
+int count = 0;
+
+/* if I choose rpm, this will vary as battery power wanes
+   if i take a reading every rotation, too much
+   set a flag? when detects or loses object update grid?
+   robot dimensions are 17 x 17cm - rebuild robot?
+   Easiest to keep grid size as circumference so know how many sqs for rotations
+   interested in L&R soanr readings between ? & ? cm
+*/
+
+bool leftObject = false;   //initialise occupied flags to false
+bool rightObject = false;
+bool frontObject = false;
+float circumference = 13.5; //diameter (4.3) * pi
+const int gridRotations = 1;   // no. roatations / grid sq
+const float safeDist = 27;    // 2 * circumference
+int gridDirection = 0;
+
+bool startSetLeft = false;
+bool startSetRight = false;
+int walls = 0;
+
+int startXL;
+int startYL;
+int endXL;
+int endYL;
+int startWCL;
+int endWCL;
+
+int startXR;
+int startYR;
+int endXR;
+int endYR;
+int startWCR;
+int endWCR;
+
+int frontX;
+int frontY;
+
+//initialise wheel counts - to be used in pose and grid updates
+long previousWC = 0;
+long currentWC = 0;
+int steps = 0;
+bool reverse = false;
+
+//struct to store robot's current position
+struct robotPose
+{
+ int x;
+ int y;
+ float theta;
+};
+
+char occGrid [41][41];
+robotPose pose;
+
+//functions
+
+void memCheck()
+{
+   // check memory usage
+ /* int ps, ds;
+  char result = GetMemoryInfo(false, ps, ds);
+  NumOut(0, LCD_LINE1, ps);
+  NumOut(0, LCD_LINE2, ds);
+  Wait(SEC_3);
+  ClearScreen();*/
+}
+
+
+void initialisePose(float degrees)
+{
+	// assume robot is in centre of grid
+	pose.x = 20;       // set to 20 to correspond to 21st element starts at 0
+	pose.y = 20;
+	// set initial direction of travel
+	pose.theta = degrees;
+}
+
+int getDirection (float degrees)
+{
+   //identify NESW from compass reading, returns int 1-8
+   // compass returns bearing/2 so 0-179
+   int direction = 0;
+    //use if and elseif
+   if(degrees >= 11 && degrees < 34)
+   {
+    direction = 2; // NE
+   }
+   else if (degrees >= 34 && degrees < 57)
+   {
+    direction = 3; // E
+   }
+   else if (degrees >= 57 && degrees < 79)
+   {
+    direction = 4; // SE
+   }
+   else if (degrees >= 79 && degrees < 102)
+   {
+      direction = 5; // S
+   }
+    else if (degrees >= 102 && degrees<124)
+   {
+     direction = 6; // SW
+   }
+    else if (degrees>= 124 && degrees < 147)
+   {
+      direction = 7; // W
+    }
+    else if (degrees >= 147 && degrees < 172)
+   {
+      direction = 8; // NW
+   }
+    else
+   {
+      direction = 1; //N
+   }
+   return direction;
+}
+
+
+
+void updatePose()
+{
+ //update robot pose using compass and odometry data
+ previousWC = currentWC;
+ currentWC = MotorRotationCount(OUT_A);
+ steps = currentWC - previousWC;
+ pose.theta = SensorHTCompass(S3);
+// pose.theta = Random(360); // using random until sensor arrives
+ int motDir = getDirection(pose.theta);
+
+ if (reverse == true)
+ {
+	 if (motDir > 4)
+	 {
+		motDir = motDir - 4;
+	 }
+	 else
+	 {
+		 motDir = motDir + 4;
+	 }
+ }
+ // rows(x) = N(-) / S(+) columns(y) = E(+)/W(-)
+ switch(motDir)
+ {
+   case 1:     // N
+        pose.x = pose.x - steps;
+        break;
+   case 2:    // NE
+        pose.x = pose.x - steps;
+        pose.y = pose.y + steps;
+        break;
+   case 3:     // E
+        pose.y = pose.y + steps;
+        break;
+   case 4:    // SE
+        pose.x = pose.x + steps;
+        pose.y = pose.y + steps;
+        break;
+   case 5: // S
+        pose.x = pose.x + steps;
+        break;
+   case 6: // SW
+        pose.x = pose.x + steps;
+        pose.y = pose.y - steps;
+        break;
+   case 7: // W
+        pose.x = pose.x - steps;
+        break;
+   default: // NW
+        pose.x = pose.x - steps;
+        pose.y = pose.y - steps;
+        break;
+ }
+}
+
+void backStep (int endX, int endY)
+{
+  int dir = getDirection(pose.theta);
+
+  switch (dir)
+  {
+   case 1:     // N
+        endX = pose.x + 1;
+        break;
+   case 2:    // NE
+        endX = pose.x + 1;
+        endY = pose.y - 1;
+        break;
+   case 3:     // E
+        endY = pose.y - 1;
+        break;
+   case 4:    // SE
+        endX = pose.x - 1;
+        endY = pose.y - 1;
+        break;
+   case 5: // S
+        endX = pose.x - 1;
+        break;
+   case 6: // SW
+        endX = pose.x - 1;
+        endY = pose.y + 1;
+        break;
+   case 7: // W
+        endY = pose.y + 1;
+        break;
+   default: // NW
+        endX = pose.x + 1;
+        endY = pose.y + 1;
+        break;
+   }
+
+}
+
+//tasks
+task gridLeft()
+{
+	// gridDirection = getDirection(pose.theta);
+/*	 int i = 0;
+    switch(gridDirection)
+    {
+      case 1:   //N
+         for(i = startXL; i<endXL;i--)
+         {
+           occGrid[i][startYL-1] = 1;
+         }
+        break;
+      case 2:   //NE
+        for(i = startXL; i<endXL;i--)
+         {
+           occGrid[i-1][startYL] = 1;
+           startYL = startYL++;
+         }
+        break;
+      case 3:   //E
+          for(i = startYL; i>endYL;i++)
+         {
+           occGrid[startXL-1][i] = 1;
+         }
+        break;
+      case 4:   //SE
+          for(i = startXL; i>endXL;i++)
+         {
+           occGrid[i-1][startYL] = 1;
+           startYL = startYL++;
+         }
+        break;
+      case 5:    //S
+           for(i = startXL; i>endXL;i++)
+         {
+           occGrid[i][startYL+1] = 1;
+         }
+        break;
+      case 6:    //SW
+          for(i = startXL; i>endXL;i++)
+         {
+           occGrid[i+1][startYL] = 1;
+           startYL = startYL--;
+         }
+        break;
+      case 7:     //W
+          for(i = startYL; i<endYL;i--)
+         {
+           occGrid[startXL+1][i] = 1;
+         }
+        break;
+      default:   //(8) NW
+       for(i = startXL; i<endXL;i--)
+         {
+           occGrid[i+1][startYL] = 1;
+           startYL = startYL--;
+         }
+      
+        break;
+    }     */
+}
+
+task gridRight()
+{
+	//  gridDirection = getDirection(pose.theta);
+	/*  int i = 0;
+    switch(gridDirection)
+    {
+      case 1:   //N
+         for(i = startXR; i<endXR;i--)
+         {
+           occGrid[i][startYR+1] = 1;
+         }
+        break;
+      case 2:   //NE
+        for(i = startXR; i<endXR;i--)
+         {
+           occGrid[i+1][startYR] = 1;
+           startYR = startYR++;
+         }
+        break;
+      case 3:   //E
+          for(i = startYR; i>endYR;i++)
+         {
+           occGrid[startXR+1][i] = 1;
+         }
+        break;
+      case 4:   //SE
+          for(i = startXR; i>endXR;i++)
+         {
+           occGrid[i+1][startYR] = 1;
+           startYR = startYR++;
+         }
+        break;
+      case 5:    //S
+           for(i = startXR; i>endXR;i++)
+         {
+           occGrid[i][startYR-1] = 1;
+         }
+        break;
+      case 6:    //SW
+          for(i = startXR; i>endXR;i++)
+         {
+           occGrid[i-1][startYR] = 1;
+           startYR = startYR--;
+         }
+        break;
+      case 7:     //W
+          for(i = startYR; i<endYR;i--)
+         {
+           occGrid[startXR-1][i] = 1;
+         }
+        break;
+      default:   //(8) NW
+       for(i = startXR; i<endXR;i--)
+         {
+           occGrid[i-1][startYR] = 1;
+           startYR = startYR--;
+         }
+
+        break;
+    } */
+}
+
+task updateLeft()
+{
+  
+  updatePose();
+  endXL = pose.x;
+  endYL = pose.y;
+  if(leftObject == false)
+  {
+    walls = walls - 1;
+  backStep(endXL, endYL);
+  }
+  gridDirection = getDirection(pose.theta);
+//  start gridLeft;
+}
+
+task updateRight()
+{
+   updatePose();
+  endXR = pose.x;
+  endYR = pose.y;
+  if (rightObject == false)
+  {
+	walls = walls - 1;  
+  backStep(endXR, endYR);
+  }
+  gridDirection = getDirection(pose.theta);
+// start gridRight;
+}
+
+task updateFront()
+{
+  gridDirection= getDirection(pose.theta);
+  //set current position
+  frontX = pose.x;
+  frontY = pose.y;
+  //find square in front
+  switch (gridDirection)
+  {
+   case 1:     // N
+        frontX = pose.x - 1;
+        break;
+   case 2:    // NE
+        frontX = pose.x - 1;
+        frontY = pose.y + 1;
+        break;
+   case 3:     // E
+        frontY = pose.y + 1;
+        break;
+   case 4:    // SE
+        frontX = pose.x + 1;
+        frontY = pose.y + 1;
+        break;
+   case 5: // S
+        frontX = pose.x + 1;
+        break;
+   case 6: // SW
+        frontX = pose.x + 1;
+        frontY = pose.y - 1;
+        break;
+   case 7: // W
+        frontY = pose.y - 1;
+        break;
+   default: // NW
+        frontX = pose.x - 1;
+        frontY = pose.y - 1;
+        break;
+   }
+   //mark square as occupied
+   occGrid[frontX][frontY] = 1;
+}
+
+task updateGrid()
+{
+   PlayToneEx(392,400,3,FALSE);
+ if((frontObject==true)&&(leftObject==true)&&(rightObject==true))
+ {
+    start updateFront;
+    start updateLeft;
+    start updateRight;
+ }
+ else
+ {
+ if (frontObject==true)
+ {
+   start updateFront;
+ }
+ if (leftObject == false)
+   {
+    // if(startSetLeft==true)
+    //{
+     startSetLeft = false;
+     start updateLeft;
+    // }
+   }
+ if (rightObject ==false)
+   {
+  // if(startSetRight==true)
+ // {
+     startSetRight = false;
+     start updateRight;
+   //  }
+   }
+   }
+}
+
+task startLeft()
+{
+  updatePose();
+   startXL = pose.x;
+   startYL = pose.y;
+   walls = walls + 1;
+   startSetLeft = true;
+}
+
+task startRight()
+{
+  updatePose();
+  startXR = pose.x;
+  startYR = pose.y;
+  walls = walls + 1;
+  startSetRight = true;
+}
+
+task turn()
+{
+  Acquire(moveMutex);
+// PlaySound(SOUND_CLICK);
+// Wait(100);
+    //I2CWrite(S1, 0x41, 0x03);   // Set S1 Sensor On
+  sonarLeft = SensorUS(IN_1);
+//	Wait(100);
+   //I2CWrite(S1, 0x41, 0x00);   // Set S1 Sensor Off
+   //I2CWrite(S2, 0x41, 0x03);   // Set S2 Sensor On
+   sonarRight = SensorUS(IN_2);
+  // Wait(100);
+   //I2CWrite(S2, 0x41, 0x00);   // Set S2 Sensor Off
+ if (sonarLeft>sonarRight)
+ {
+   OnFwd(OUT_B,50);
+   OnRev(OUT_A,50);
+   Wait(1500);
+ }
+ else
+ {
+   OnFwd(OUT_A,50);
+   OnRev(OUT_B,50);
+   Wait(1500);
+ }
+ Float(OUT_AB);
+ Release(moveMutex);
+}
+
+task exitAlley()
+{
+    Float(OUT_AB);
+  
+    updatePose();
+    Acquire(moveMutex);
+  while(walls > 0)
+ {
+    PlayToneEx(292,40,3,FALSE);
+	//  PlaySound(SOUND_DOUBLE_BEEP);
+	//  Wait(100);
+   OnRev(OUT_AB,50);
+    //I2CWrite(S1, 0x41, 0x03);   // Set S1 Sensor On
+    sonarLeft = SensorUS(IN_1);
+//	Wait(100);
+   //I2CWrite(S1, 0x41, 0x00);   // Set S1 Sensor Off
+   //I2CWrite(S2, 0x41, 0x03);   // Set S2 Sensor On
+   sonarRight = SensorUS(IN_2);
+ //  Wait(100);
+   //I2CWrite(S2, 0x41, 0x00);   // Set S2 Sensor Off
+    if (sonarLeft<minSonar)
+   {
+    leftObject = false;
+    walls = walls -1;
+   }
+     if (sonarLeft>maxSonar)
+   {
+    leftObject = false;
+    walls = walls -1;
+   }
+    if (sonarRight<minSonar)
+   {
+    rightObject = false;
+    walls = walls -1;
+   }
+      if (sonarRight>maxSonar)
+   {
+    rightObject = false;
+    walls = walls -1;
+   }
+ }
+ Float(OUT_AB);
+ Release(moveMutex);
+ updatePose();
+ start turn;
+}
+
+task explore()
+{
+   
+   long t3=0, timer3=0;
+    Acquire(moveMutex);
+   t3=CurrentTick();
+   while(frontObject==false)
+   {
+	  PlayToneEx(262,40,3,FALSE);
+    if(walls > 0)
+    {
+       PlayToneEx(202,40,3,FALSE);
+       // Wait(300);
+        OnFwd(OUT_AB,50);
+		
+	// checking for wall end
+       sonarLeft = SensorUS(IN_1);
+	//  Wait(100);
+      sonarRight = SensorUS(IN_2);
+	//  Wait(100);
+		if ((sonarLeft<minSonar) || (sonarLeft>maxSonar))
+		{
+		Float(OUT_AB);
+		leftObject = false;
+		start updateGrid;
+		}
+
+        if ((sonarRight<minSonar) || (sonarRight>maxSonar))
+        {
+        Float(OUT_AB);
+        rightObject = false;
+        start updateGrid;
+        }      
+    }
+    else
+    {
+       OnFwd(OUT_AB,50);
+       timer3 = CurrentTick() - t3;
+       if(timer3 > 30000 )
+       {
+         Release(moveMutex);
+         start turn;
+         t3 = CurrentTick();
+       }
+	   // checking for wall start
+	   sonarLeft = SensorUS(IN_1);
+	   if ((sonarLeft>minSonar) && (sonarLeft<maxSonar))
+       {
+	    leftObject = true;
+		start startLeft;
+       }	 
+       sonarRight = SensorUS(IN_2);
+	   if ((sonarRight>minSonar) && (sonarRight<maxSonar))
+       {
+	    rightObject = true;
+		start startRight;
+      }   
+    }
+    sonarCentre = SensorUS(IN_4);
+    if(sonarCentre<=safeDist)
+    {
+     frontObject = true;
+    }
+   }
+   Release(moveMutex);
+}
+
+task avoid()
+{
+   PlayToneEx(362,40,3,FALSE);
+   Acquire(moveMutex);  
+   Float(OUT_AB);
+   updatePose();
+   start updateGrid;
+   reverse = true;
+   // read front sonar 
+   sonarCentre = SensorUS(IN_4);
+  // retreat to a safe distance   
+   while(sonarCentre < 2*safeDist)
+   {
+    OnRev(OUT_AB,50);
+    sonarCentre = SensorUS(IN_4);
+   }
+   Float(OUT_AB);
+   frontObject = false;
+   updatePose();
+   Release(moveMutex);
+   if( walls == 2 )
+   {
+     start exitAlley;
+   }
+   else
+   {
+     start turn;
+   }
+}
+
+/* task followWall()
+{
+  PlayToneEx(342,40,3,FALSE);
+  Acquire(moveMutex);
+  Float(OUT_AB);
+  updatePose();
+  
+  while(leftObject==true || rightObject==true)
+  {     Acquire(moveMutex);
+        OnFwdReg(OUT_AB,50,OUT_REGMODE_SYNC);
+		sonarLeft=SensorUS(IN_1);
+		sonarRight=SensorUS(IN_2);
+		if(sonarLeft<minSonar || sonarLeft>maxSonar)
+		{
+			leftObject = false;
+		}
+		if(sonarRight<minSonar || sonarRight>maxSonar)
+		{
+			rightObject = false;
+		}
+		sonarCentre=SensorUS(IN_4); 
+        if(sonarCentre<=safeDist)
+		{
+		 frontObject = true;
+		 Release(moveMutex);
+		 start avoid;
+		}			
+   }
+  Float(OUT_AB);
+  updatePose();
+   Release(moveMutex);
+
+}   */
+
+
+task controller()
+{
+ long t0=0, timer=0;
+ t0 = CurrentTick();
+ timer=CurrentTick()-t0;
+ while (timer<runTime)
+ {
+   // read sonar
+  sonarLeft = SensorUS(IN_1);
+  sonarRight = SensorUS(IN_2);
+  sonarCentre = SensorUS(IN_4);
+  // check for left wall
+  if((sonarLeft>=minSonar) && (sonarLeft<=maxSonar))
+  {
+   PlayToneEx(233,40,3,FALSE);
+   leftObject = true;
+  if(startSetLeft == false)
+   {
+      PlayToneEx(220,40,3,FALSE);
+     start startLeft;
+   }
+  }
+  // check for right wall  
+ if((sonarRight>=minSonar) && (sonarRight<=maxSonar))
+  {
+    PlayToneEx(415,40,3,FALSE);
+   rightObject = true;
+   if(startSetRight == false)
+   {
+      PlayToneEx(393,40,3,FALSE);
+      start startRight;
+   }
+  }
+
+  if(sonarCentre<=safeDist)
+  {
+    PlayToneEx(370,40,3,FALSE);
+   frontObject = true;
+  }
+  
+  if (frontObject==false)
+  {
+   PlayToneEx(349,40,3,FALSE);
+   start explore;
+  }  
+ else
+  {
+    PlayToneEx(247,40,3,FALSE);
+    start avoid;
+  }
+  timer = CurrentTick() - t0;
+ }
+	
+}
+
+task main()
+{
+   // set-up sensors as lowspeed 3 x sonar, 1 x compass
+  SetSensorLowspeed(IN_1); // left
+  SetSensorLowspeed(IN_2); // right
+  SetSensorLowspeed(IN_3); // compass
+  SetSensorLowspeed(IN_4); // centre
+
+  //trying to avoid sonar interence by using mode 3
+ //I2CWrite(S1, 0x41, 0x00);   // Set S4 Sensor Off
+ //I2CWrite(S2, 0x41, 0x00);   // Set S4 Sensor Off
+ //I2CWrite(S4, 0x41, 0x00);   // Set S4 Sensor Off
+
+  compassRead = SensorHTCompass(S3);
+ //   compassRead = Random(360);
+  
+  initialisePose(compassRead);
+  currentWC = MotorRotationCount(OUT_A); //initial wheel rotations
+  
+   memCheck();
+  
+  while(true)
+  {
+  start controller;
+  Float(OUT_AB);
+  PlayToneEx(292,40,3,FALSE);
+  }
+//   PlaySound(SOUND_DOWN);
+//  Wait(200);
+  // write occupancy grid to file
+  byte handle;
+  int loop;
+  CreateFile("occGrid.txt", 4096, handle);
+  for (loop=0;loop<ArrayLen(occGrid);loop++)
+  {
+    WriteLn(handle,loop);
+  }
+  CloseFile(handle);     
+}
